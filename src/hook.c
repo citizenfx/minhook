@@ -260,10 +260,8 @@ static VOID ProcessThreadIPs(HANDLE hThread, UINT pos, UINT action)
 }
 
 //-------------------------------------------------------------------------
-static BOOL EnumerateThreads(PFROZEN_THREADS pThreads)
+static VOID EnumerateThreads(PFROZEN_THREADS pThreads)
 {
-    BOOL succeeded = FALSE;
-
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (hSnapshot != INVALID_HANDLE_VALUE)
     {
@@ -271,7 +269,6 @@ static BOOL EnumerateThreads(PFROZEN_THREADS pThreads)
         te.dwSize = sizeof(THREADENTRY32);
         if (Thread32First(hSnapshot, &te))
         {
-            succeeded = TRUE;
             do
             {
                 if (te.dwSize >= (FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) + sizeof(DWORD))
@@ -284,22 +281,20 @@ static BOOL EnumerateThreads(PFROZEN_THREADS pThreads)
                         pThreads->pItems
                             = (LPDWORD)HeapAlloc(g_hHeap, 0, pThreads->capacity * sizeof(DWORD));
                         if (pThreads->pItems == NULL)
-                        {
-                            succeeded = FALSE;
                             break;
-                        }
                     }
                     else if (pThreads->size >= pThreads->capacity)
                     {
-                        pThreads->capacity *= 2;
                         LPDWORD p = (LPDWORD)HeapReAlloc(
-                            g_hHeap, 0, pThreads->pItems, pThreads->capacity * sizeof(DWORD));
+                            g_hHeap, 0, pThreads->pItems, (pThreads->capacity * 2) * sizeof(DWORD));
                         if (p == NULL)
                         {
-                            succeeded = FALSE;
+                            HeapFree(g_hHeap, 0, pThreads->pItems);
+                            pThreads->pItems = NULL;
                             break;
                         }
 
+                        pThreads->capacity *= 2;
                         pThreads->pItems = p;
                     }
                     pThreads->pItems[pThreads->size++] = te.th32ThreadID;
@@ -307,35 +302,22 @@ static BOOL EnumerateThreads(PFROZEN_THREADS pThreads)
 
                 te.dwSize = sizeof(THREADENTRY32);
             } while (Thread32Next(hSnapshot, &te));
-
-            if (succeeded && GetLastError() != ERROR_NO_MORE_FILES)
-                succeeded = FALSE;
-
-            if (!succeeded && pThreads->pItems != NULL)
-            {
-                HeapFree(g_hHeap, 0, pThreads->pItems);
-                pThreads->pItems = NULL;
-            }
         }
         CloseHandle(hSnapshot);
     }
-
-    return succeeded;
 }
 
 //-------------------------------------------------------------------------
 static MH_STATUS Freeze(PFROZEN_THREADS pThreads, UINT pos, UINT action)
 {
-    MH_STATUS status = MH_OK;
-
     pThreads->pItems   = NULL;
     pThreads->capacity = 0;
     pThreads->size     = 0;
-    if (!EnumerateThreads(pThreads))
-    {
-        status = MH_ERROR_MEMORY_ALLOC;
-    }
-    else if (pThreads->pItems != NULL)
+    EnumerateThreads(pThreads);
+
+    MH_STATUS status = MH_OK;
+
+    if (pThreads->pItems != NULL)
     {
         UINT i;
         for (i = 0; i < pThreads->size; ++i)
@@ -349,6 +331,10 @@ static MH_STATUS Freeze(PFROZEN_THREADS pThreads, UINT pos, UINT action)
             }
         }
     }
+    else
+    {
+        status = MH_ERROR_MEMORY_ALLOC;
+    }
 
     return status;
 }
@@ -356,21 +342,18 @@ static MH_STATUS Freeze(PFROZEN_THREADS pThreads, UINT pos, UINT action)
 //-------------------------------------------------------------------------
 static VOID Unfreeze(PFROZEN_THREADS pThreads)
 {
-    if (pThreads->pItems != NULL)
+    UINT i;
+    for (i = 0; i < pThreads->size; ++i)
     {
-        UINT i;
-        for (i = 0; i < pThreads->size; ++i)
+        HANDLE hThread = OpenThread(THREAD_ACCESS, FALSE, pThreads->pItems[i]);
+        if (hThread != NULL)
         {
-            HANDLE hThread = OpenThread(THREAD_ACCESS, FALSE, pThreads->pItems[i]);
-            if (hThread != NULL)
-            {
-                ResumeThread(hThread);
-                CloseHandle(hThread);
-            }
+            ResumeThread(hThread);
+            CloseHandle(hThread);
         }
-
-        HeapFree(g_hHeap, 0, pThreads->pItems);
     }
+
+    HeapFree(g_hHeap, 0, pThreads->pItems);
 }
 
 //-------------------------------------------------------------------------
